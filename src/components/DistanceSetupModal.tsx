@@ -29,7 +29,7 @@ export const DistanceSetupModal = ({ onComplete }: DistanceSetupModalProps) => {
     const normalizedSize = boxSize / 640;
     const estimatedCm = normalizedSize > 0.05 ? Math.round(15 / normalizedSize) : 80;
     
-    return Math.max(20, Math.min(100, estimatedCm));
+    return Math.max(10, Math.min(100, estimatedCm));
   }, []);
 
   // Load models

@@ -74,10 +74,10 @@ export const useLivenessCheck = (): UseLivenessCheckReturn => {
     const normalizedSize = boxSize / videoWidth;
     
     // Convert to estimated cm (inverse relationship)
-    // calibrated: normalizedSize 0.25 ≈ 50cm
+    // calibrated: normalizedSize 0.3 ≈ 50cm
     const estimatedCm = normalizedSize > 0.05 ? Math.round(15 / normalizedSize) : 80;
     
-    return Math.max(20, Math.min(100, estimatedCm));
+    return Math.max(10, Math.min(100, estimatedCm));
   }, []);
 
   // Start real-time face distance detection (runs independently of liveness check)

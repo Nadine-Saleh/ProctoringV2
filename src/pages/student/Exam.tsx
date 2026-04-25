@@ -165,7 +165,7 @@ export const Exam = () => {
 
   const combinedVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const gazeDistanceCm = gazeSample ? Math.round(30 + (1 - gazeSample.faceDistance) * 70) : null;
+  const gazeDistanceCm = gazeSample ? Math.round(gazeSample.faceDistanceCm) : null;
   const faceDistanceCm = examStarted ? gazeDistanceCm : livenessFaceDistanceCm;
 
   // T059: Tab focus tracking

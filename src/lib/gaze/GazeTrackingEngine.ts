@@ -31,7 +31,8 @@ export interface GazeSample {
   zone: GazeZone['id'];
   gazeAngle: number; // degrees from screen center
   confidence: number;
-  faceDistance: number; // 0-1, normalized distance from camera
+  faceDistance: number; // 0-1, normalized proximity
+  faceDistanceCm: number; // Actual distance in centimeters
   headPitch: number; // degrees
   headYaw: number; // degrees
   headRoll: number; // degrees
@@ -48,6 +49,7 @@ export interface AttentionMetrics {
   offScreenTime: number; // ms
   attentionPercentage: number; // 0-100
   averageFaceDistance: number; // 0-1
+  averageFaceDistanceCm: number; // cm
   blinkRate: number; // blinks per minute
   gazeShifts: number; // count of on/off screen transitions
   longestOffScreenPeriod: number; // ms
@@ -79,6 +81,7 @@ export interface CalibrationData {
   downThreshold: number;
   faceDistanceMin: number;
   faceDistanceMax: number;
+  focalLength: number; // Calibrated focal length
   isCalibrated: boolean;
   calibrationTimestamp: number | null;
 }
@@ -88,8 +91,8 @@ export interface GazeTrackingConfig {
   frameSkip: number; // Process every N frames
   offScreenThreshold: number; // ms before triggering warning
   prolongedAwayThreshold: number; // ms before critical violation
-  minFaceDistance: number; // Too close threshold
-  maxFaceDistance: number; // Too far threshold
+  minFaceDistanceCm: number; // Too close threshold in cm
+  maxFaceDistanceCm: number; // Too far threshold in cm
   blinkThreshold: number; // EAR value
   enableCalibration: boolean;
   enableWarnings: boolean;
@@ -111,14 +114,16 @@ export interface GazeTrackingState {
 
 // ==================== Constants ====================
 
+const REAL_FACE_WIDTH_CM = 16; // Average human face width
+const DEFAULT_FOCAL_LENGTH = 500; // Generic starting focal length
+
 const DEFAULT_CONFIG: GazeTrackingConfig = {
   sensitivity: 'medium',
   frameSkip: 3, // Process every 3rd frame (~10fps at 30fps input)
   offScreenThreshold: 2000, // 2 seconds
   prolongedAwayThreshold: 5000, // 5 seconds
-  // faceDistance is proximity: 0 = very far, 1 = very close.
-  minFaceDistance: 0.15, // Below this → too far from camera
-  maxFaceDistance: 0.6,  // Above this → too close to camera
+  minFaceDistanceCm: 30, // Too close threshold
+  maxFaceDistanceCm: 100, // Too far threshold
   blinkThreshold: 0.25,
   enableCalibration: true,
   enableWarnings: true,
@@ -459,8 +464,12 @@ export class GazeTrackingEngine {
     // Calculate head pose
     const headPose = this.estimateHeadPose(landmarks);
     
-    // Calculate face distance
-    const faceDistance = this.estimateFaceDistance(landmarks);
+    // Calculate face distance in CM
+    const faceDistanceCm = this.estimateFaceDistanceCm(landmarks);
+    
+    // Calculate proximity (0-1) for backward compatibility and internal thresholds
+    // Mapping: 100cm (far) -> 0, 30cm (close) -> 1
+    const proximity = Math.max(0, Math.min(1, (100 - faceDistanceCm) / (100 - 30)));
     
     const eyeOffset = this.calculateAverageEyeOffset(leftPupilPos, rightPupilPos);
     const gazeAngle = this.calculateScreenCenterAngle(headPose, eyeOffset);
@@ -475,7 +484,8 @@ export class GazeTrackingEngine {
       zone,
       gazeAngle,
       confidence: 0.95,
-      faceDistance,
+      faceDistance: proximity,
+      faceDistanceCm,
       headPitch: headPose.pitch,
       headYaw: headPose.yaw,
       headRoll: headPose.roll,
@@ -494,6 +504,65 @@ export class GazeTrackingEngine {
 
     return sample;
   }
+
+  // ==================== Distance Calculations ====================
+
+  /**
+   * Estimates real-world face distance in centimeters.
+   * Uses formula: distance = (REAL_WIDTH * FOCAL_LENGTH) / PIXEL_WIDTH
+   */
+  private estimateFaceDistanceCm(landmarks: NormalizedLandmark[]): number {
+    // Using landmarks 234 and 454 for horizontal face width
+    const leftFace = landmarks[234];
+    const rightFace = landmarks[454];
+
+    if (!leftFace || !rightFace || !this.videoElement) {
+      return 50; // Default fallback
+    }
+
+    // Convert normalized width to pixel width
+    const videoWidth = this.videoElement.videoWidth || 640;
+    const faceWidthPixels = Math.abs(rightFace.x - leftFace.x) * videoWidth;
+
+    if (faceWidthPixels === 0) return 50;
+
+    // Calculate distance
+    const focalLength = this.calibration.focalLength || DEFAULT_FOCAL_LENGTH;
+    const distanceCm = (REAL_FACE_WIDTH_CM * focalLength) / faceWidthPixels;
+
+    // Clamp to realistic range
+    return Math.max(10, Math.min(200, distanceCm));
+  }
+
+  /**
+   * Calibrates focal length using a known distance.
+   * Formula: focalLength = (distanceCm * faceWidthPixels) / REAL_WIDTH
+   */
+  public setFocalLengthFromDistance(knownDistanceCm: number, landmarks: NormalizedLandmark[]): number {
+    const leftFace = landmarks[234];
+    const rightFace = landmarks[454];
+    
+    if (!leftFace || !rightFace || !this.videoElement) {
+      return DEFAULT_FOCAL_LENGTH;
+    }
+
+    const videoWidth = this.videoElement.videoWidth || 640;
+    const faceWidthPixels = Math.abs(rightFace.x - leftFace.x) * videoWidth;
+    
+    if (faceWidthPixels === 0) return DEFAULT_FOCAL_LENGTH;
+
+    const focalLength = (knownDistanceCm * faceWidthPixels) / REAL_FACE_WIDTH_CM;
+    
+    this.calibration.focalLength = focalLength;
+    this.calibration.isCalibrated = true;
+    this.calibration.calibrationTimestamp = Date.now();
+    
+    this.updateState({ isCalibrated: true });
+    
+    return focalLength;
+  }
+
+  // ==================== Eye Calculations ====================
 
   private determineGazeZone(
     gazeAngle: number,
@@ -618,28 +687,6 @@ export class GazeTrackingEngine {
     return { pitch, yaw, roll };
   }
 
-  private estimateFaceDistance(landmarks: NormalizedLandmark[]): number {
-    // Inter-ocular distance is far more robust than forehead-to-chin under head pitch/yaw.
-    const leftEyeCorner = landmarks[33];
-    const rightEyeCorner = landmarks[263];
-
-    if (!leftEyeCorner || !rightEyeCorner) {
-      return 0.5;
-    }
-
-    const eyeDist = Math.hypot(
-      leftEyeCorner.x - rightEyeCorner.x,
-      leftEyeCorner.y - rightEyeCorner.y
-    );
-
-    // Typical inter-ocular distance in normalized video coords:
-    //   ~0.06 when the user is very far, ~0.18 when the face fills the frame.
-    // Return a proximity value: 0 = very far, 1 = very close to camera.
-    const proximity = (eyeDist - 0.06) / (0.18 - 0.06);
-
-    return Math.max(0, Math.min(1, proximity));
-  }
-
   // ==================== Violation Detection ====================
 
   private checkViolations(sample: GazeSample): void {
@@ -674,10 +721,8 @@ export class GazeTrackingEngine {
       this.lastViolationAt.delete('PROLONGED_AWAY');
     }
 
-    // Face distance — `faceDistance` is proximity: 0 = very far, 1 = very close.
-    // Fire CLOSE_FACE only when the face is actually too close, with a cooldown
-    // so it does not emit on every processed frame.
-    if (sample.faceDistance > this.config.maxFaceDistance) {
+    // Face distance — Use CM-based thresholds
+    if (sample.faceDistanceCm < this.config.minFaceDistanceCm) {
       const lastClose = this.lastViolationAt.get('CLOSE_FACE') ?? 0;
       if (now - lastClose >= GazeTrackingEngine.VIOLATION_COOLDOWN_MS) {
         this.lastViolationAt.set('CLOSE_FACE', now);
